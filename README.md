@@ -14,7 +14,7 @@ Dependencies:
 Notes:
 - This project is in its infant stage.
 - This is my first public project in Github, so there's a lot that I don't know. Suggestions/guidance is welcomed.
-- Contribution is welcome.
+- Contribution is welcomed.
 - Delphi version is XE7, but I think it should compile in latest Delphi versions.
 - Supports older/legacy KASA devices (hw version 5.0) and newer KLAP protocol devices (hw version 5.26)
 
