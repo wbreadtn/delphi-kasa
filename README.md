@@ -3,6 +3,12 @@ Delphi lib that provides direct interface to Kasa IOT devices
 
 Scope:
 - Circumvent dependency on TP-Link cloud-based control of Kasa IOT devices
+- Summary of functionality:
+   - Get device info
+   - Get device state on/off
+   - Turn the device on/off
+ - Missing/desired improvements
+   - Device discovery (I currently use reserved mac address->IP)
 
 Special thanks to the creators of python-kasa wherein I found lots of code that helped me in this project!
 - https://github.com/python-kasa
