@@ -34,10 +34,6 @@ type
   public
     constructor Create(const Host: string; Port: Integer = 9999; Timeout: Integer = 5000);
 
-    // Diagnostic methods
-    function TestConnection: Boolean;
-    function ScanPorts: string;
-
     // Main control methods
     function TurnOn: Boolean;
     function TurnOff: Boolean;
@@ -45,7 +41,7 @@ type
     function GetState: Boolean;
 
     // Device information
-    function GetDeviceInfo: TKasaDeviceInfo;
+    function GetDeviceInfo(var Res: TKasaDeviceInfo): boolean;
     function GetSystemInfo: string;
 
     // LED control
@@ -328,17 +324,18 @@ function TKasaXORController.GetState: Boolean;
 var
   DeviceInfo: TKasaDeviceInfo;
 begin
-  DeviceInfo := GetDeviceInfo;
+  GetDeviceInfo(DeviceInfo);
   Result := DeviceInfo.IsOn;
 end;
 
-function TKasaXORController.GetDeviceInfo: TKasaDeviceInfo;
+function TKasaXORController.GetDeviceInfo(var Res: TKasaDeviceInfo): boolean;
 var
   Response: string;
   JSONResponse: TJSONObject;
   SystemObj: TJSONObject;
   SysInfoObj: TJSONObject;
 begin
+  result := false;
   FillChar(Result, SizeOf(Result), 0);
 
   try
@@ -353,14 +350,15 @@ begin
           SysInfoObj := SystemObj.GetValue('get_sysinfo') as TJSONObject;
           if Assigned(SysInfoObj) then
           begin
-            Result.DeviceId := (SysInfoObj.GetValue('deviceId') as TJSONString).Value;
-            Result.Model := (SysInfoObj.GetValue('model') as TJSONString).Value;
-            Result.HardwareVersion := (SysInfoObj.GetValue('hw_ver') as TJSONString).Value;
-            Result.SoftwareVersion := (SysInfoObj.GetValue('sw_ver') as TJSONString).Value;
-            Result.DeviceName := (SysInfoObj.GetValue('alias') as TJSONString).Value;
-            Result.IsOn := (SysInfoObj.GetValue('relay_state') as TJSONNumber).AsInt = 1;
-            Result.RSSI := (SysInfoObj.GetValue('rssi') as TJSONNumber).AsInt;
-            Result.LEDOff := (SysInfoObj.GetValue('led_off') as TJSONNumber).AsInt = 1;
+            Res.DeviceId := (SysInfoObj.GetValue('deviceId') as TJSONString).Value;
+            Res.Model := (SysInfoObj.GetValue('model') as TJSONString).Value;
+            Res.HardwareVersion := (SysInfoObj.GetValue('hw_ver') as TJSONString).Value;
+            Res.SoftwareVersion := (SysInfoObj.GetValue('sw_ver') as TJSONString).Value;
+            Res.DeviceName := (SysInfoObj.GetValue('alias') as TJSONString).Value;
+            Res.IsOn := (SysInfoObj.GetValue('relay_state') as TJSONNumber).AsInt = 1;
+            Res.RSSI := (SysInfoObj.GetValue('rssi') as TJSONNumber).AsInt;
+            Res.LEDOff := (SysInfoObj.GetValue('led_off') as TJSONNumber).AsInt = 1;
+            result := true;
           end;
         end;
       end;
@@ -420,75 +418,6 @@ begin
   except
     on E: Exception do
       raise Exception.Create('Failed to set LED state: ' + E.Message);
-  end;
-end;
-
-function TKasaXORController.TestConnection: Boolean;
-var
-  TCPClient: TIdTCPClient;
-begin
-  Result := False;
-  TCPClient := TIdTCPClient.Create(nil);
-  try
-    TCPClient.Host := FHost;
-    TCPClient.Port := FPort;
-    TCPClient.ConnectTimeout := FTimeout;
-
-    try
-      TCPClient.Connect;
-      Result := TCPClient.Connected;
-      if TCPClient.Connected then
-        TCPClient.Disconnect;
-    except
-      // Connection failed
-      Result := False;
-    end;
-  finally
-    TCPClient.Free;
-  end;
-end;
-
-function TKasaXORController.ScanPorts: string;
-var
-  TCPClient: TIdTCPClient;
-  TestPorts: array[0..6] of Integer;
-  i: Integer;
-  PortResult: string;
-begin
-  Result := 'Port scan results for ' + FHost + ':' + sLineBreak;
-  TestPorts[0] := 9999;  // Standard Kasa port
-  TestPorts[1] := 80;    // HTTP
-  TestPorts[2] := 443;   // HTTPS
-  TestPorts[3] := 23;    // Telnet
-  TestPorts[4] := 9998;  // Alternative Kasa port
-  TestPorts[5] := 1040;  // Some TP-Link devices
-  TestPorts[6] := 20002; // Some newer devices
-
-  for i := 0 to High(TestPorts) do
-  begin
-    TCPClient := TIdTCPClient.Create(nil);
-    try
-      TCPClient.Host := FHost;
-      TCPClient.Port := TestPorts[i];
-      TCPClient.ConnectTimeout := 2000; // Shorter timeout for scanning
-
-      try
-        TCPClient.Connect;
-        if TCPClient.Connected then
-        begin
-          PortResult := 'OPEN';
-          TCPClient.Disconnect;
-        end
-        else
-          PortResult := 'CLOSED';
-      except
-        PortResult := 'CLOSED/FILTERED';
-      end;
-
-      Result := Result + Format('Port %d: %s', [TestPorts[i], PortResult]) + sLineBreak;
-    finally
-      TCPClient.Free;
-    end;
   end;
 end;
 

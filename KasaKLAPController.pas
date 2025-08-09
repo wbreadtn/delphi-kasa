@@ -21,14 +21,13 @@ uses
   ,IdIOHandlerStack
   ,IdException
   ,IdExceptionCore
-  ,IdCoderMIME
   ,IOUtils
-//  ,Crypto
-  ,DCPrijndael
+  ,SuperObject
   ;
 
 type
   TKlapVersion = (kvV1, kvV2, kvV2_alt); // Added kvV0 for XOR protocol
+  TKasaLogger = procedure (Sender: TObject; Text: string) of object;
 
   THTTPIOHandlerHelper = class
   private
@@ -38,6 +37,7 @@ type
     FProxyUser: string;
     FProxyPassword: string;
     FUseProxy: Boolean;
+    FKasaLogger: TKasaLogger;
     procedure CustomizeIOHandler(AIOHandler: TIdIOHandler);
     procedure CheckHeaders(AHeaders: TStrings; var Raw: string);
     function BuildRawHTTPRequest(const AMethod, APath, AHost: string;
@@ -48,7 +48,6 @@ type
       const AHeaders: TStrings; const ABody: string = ''): string; overload;
     function BuildProxyHTTPRequest(const AMethod, AURL: string;
       const AHeaders: TStrings; ARequestStream: TStream): string; overload;
-    function EncodeBase64(const AInput: string): string;
   public
     constructor Create;
     destructor Destroy; override;
@@ -60,6 +59,7 @@ type
       const AHeaders: TStrings; ARequestStream: TStream; ResponseHeaders: TStrings; AResponseStream: TStream); overload;
     function SendCustomGETRequest(const AURL: string): string;
     function SendCustomPOSTRequest(const AURL: string; const APostData: string): string;
+    property KasaLogger: TKasaLogger read FKasaLogger write FKasaLogger;
   end;
 
   TKasaKLAPClient = class
@@ -81,10 +81,10 @@ type
     FBaseIV: TBytes;
     FSignatureKey: TBytes;
     FKlapVersion: TKlapVersion;
+    FAltCredentials: ISuperobject;
+    FKasaLogger: TKasaLogger;
     function GenerateRandomBytes(ALength: Integer): TBytes;
     function KlapEncrypt(const APlaintext: TBytes): TBytes;
-    //function KlapEncrypt(const APlaintext: TBytes; ASeq: Integer): TBytes;
-    //function KlapDecrypt(const ACiphertext: TBytes; ASeq: Integer): TBytes;
     function KlapDecrypt(const AEncryptedData: TBytes): TBytes;
     function CalculateAuthHash(KlapVersion: TKlapVersion; aUsername, aPassword: string): TBytes;
     procedure InitializeEncryption;
@@ -96,16 +96,19 @@ type
     destructor Destroy; override;
 
     function Handshake(var StatusText: string): Boolean;
-    function SendCommand(ACommand: string): string;
+    function SendCommand(ACommand: string; var Res: string): boolean;
+    function PerformSend(Command: string): Boolean;
     function TurnOn: Boolean;
     function TurnOff: Boolean;
-    function GetDeviceInfo: string;
+    function GetDeviceInfo(var Res: string): boolean;
 
     property Host: string read FHost write FHost;
     property Port: Integer read FPort write FPort;
     property Username: string read FUsername write FUsername;
     property Password: string read FPassword write FPassword;
     property KlapVersion: TKlapVersion read FKlapVersion write FKlapVersion;
+    property AltCredentials: ISuperobject read FAltCredentials write FAltCredentials;
+    property KasaLogger: TKasaLogger read FKasaLogger write FKasaLogger;
   end;
 
 implementation
@@ -113,6 +116,7 @@ implementation
 constructor THTTPIOHandlerHelper.Create;
 begin
   inherited Create;
+  FKasaLogger := nil;
   FIdHTTP := TIdHTTP.Create(nil);
 
   // Don't create SSL handler by default - create it only when needed
@@ -166,13 +170,6 @@ begin
         Raw := Raw + AHeaders[i] + #13#10;
     end;
   end;
-
-  // Add default headers if not present
-//  if (AHeaders = nil) or (AHeaders.IndexOfName('User-Agent') = -1) then
-//    Result := Result + 'User-Agent: Custom-Indy-Client/1.0' + #13#10;
-
-//  if (AHeaders = nil) or (AHeaders.IndexOfName('Connection') = -1) then
-//    Result := Result + 'Connection: close' + #13#10;
 end;
 
 function THTTPIOHandlerHelper.BuildRawHTTPRequest(const AMethod, APath, AHost: string;
@@ -238,18 +235,6 @@ begin
   FProxyPort := 0;
   FProxyUser := '';
   FProxyPassword := '';
-end;
-
-function THTTPIOHandlerHelper.EncodeBase64(const AInput: string): string;
-var
-  Encoder: TIdEncoderMIME;
-begin
-  Encoder := TIdEncoderMIME.Create(nil);
-  try
-    Result := Encoder.Encode(AInput);
-  finally
-    Encoder.Free;
-  end;
 end;
 
 function THTTPIOHandlerHelper.BuildProxyHTTPRequest(const AMethod, AURL: string;
@@ -385,7 +370,7 @@ begin
       begin
         if Seq <> 0
           then AURL := AURL + '?seq='+IntToStr(Seq);
-        //WriteLn('Debug - AURL Path: ' + AURL);
+        if assigned(FKasaLogger) then FKasaLogger(self,'Debug - AURL Path: ' + AURL);
         RawRequest := BuildProxyHTTPRequest(AMethod, AURL, AHeaders, ARequestStream)
       end
       else
@@ -393,10 +378,13 @@ begin
         RequestPath := URI.Path + URI.Document;
         if Seq <> 0
           then RequestPath := RequestPath + '?seq='+IntToStr(Seq);
-        //WriteLn('Debug - Full URL: ' + AURL);
-        //WriteLn('Debug - URI.Path: ' + URI.Path);
-        //WriteLn('Debug - URI.Document: ' + URI.Document);
-        //WriteLn('Debug - Combined Path: ' + RequestPath);
+        if assigned(FKasaLogger) then
+          begin
+            FKasaLogger(self,'Debug - Full URL: ' + AURL);
+            FKasaLogger(self,'Debug - URI.Path: ' + URI.Path);
+            FKasaLogger(self,'Debug - URI.Document: ' + URI.Document);
+            FKasaLogger(self,'Debug - Combined Path: ' + RequestPath);
+          end;
         RawRequest := BuildRawHTTPRequest(AMethod, RequestPath, URI.Host, AHeaders, ARequestStream);
       end;
 
@@ -585,7 +573,7 @@ begin
       begin
         if Seq <> 0
           then AURL := AURL + '?seq='+IntToStr(Seq);
-        //WriteLn('Debug - AURL Path: ' + AURL);
+        if assigned(FKasaLogger) then FKasaLogger(self,'Debug - AURL Path: ' + AURL);
         RawRequest := BuildProxyHTTPRequest(AMethod, AURL, AHeaders, ABody)
       end
       else
@@ -593,10 +581,14 @@ begin
         RequestPath := URI.Path + URI.Document;
         if Seq <> 0
           then RequestPath := RequestPath + '?seq='+IntToStr(Seq);
-        //WriteLn('Debug - Full URL: ' + AURL);
-        //WriteLn('Debug - URI.Path: ' + URI.Path);
-        //WriteLn('Debug - URI.Document: ' + URI.Document);
-        //WriteLn('Debug - Combined Path: ' + RequestPath);
+        if assigned(FKasaLogger) then
+          begin
+            FKasaLogger(self,'Debug - Full URL: ' + AURL);
+            FKasaLogger(self,'Debug - URI.Path: ' + URI.Path);
+            FKasaLogger(self,'Debug - URI.Document: ' + URI.Document);
+            FKasaLogger(self,'Debug - Combined Path: ' + RequestPath);
+          end;
+
         RawRequest := BuildRawHTTPRequest(AMethod, RequestPath, URI.Host, AHeaders, ABody);
       end;
 
@@ -669,6 +661,7 @@ constructor TKasaKLAPClient.Create(const AHost: string; APort: Integer;
                                   const AUsername, APassword: string);
 begin
   inherited Create;
+  FKasaLogger := nil;
   FHost := AHost;
   FPort := APort;
   FUsername := AUsername;
@@ -723,39 +716,6 @@ begin
   end;
 end;
 
-(*
-function TKasaKLAPClient.KlapEncrypt(const APlaintext: TBytes; ASeq: Integer): TBytes;
-var
-  Key: TBytes;
-  SeqBytes: TBytes;
-  i: Integer;
-begin
-  // Create encryption key from session key + sequence number
-  SetLength(SeqBytes, 4);
-  SeqBytes[0] := ASeq and $FF;
-  SeqBytes[1] := (ASeq shr 8) and $FF;
-  SeqBytes[2] := (ASeq shr 16) and $FF;
-  SeqBytes[3] := (ASeq shr 24) and $FF;
-
-  SetLength(Key, Length(FSessionKey) + Length(SeqBytes));
-  Move(FSessionKey[0], Key[0], Length(FSessionKey));
-  Move(SeqBytes[0], Key[Length(FSessionKey)], Length(SeqBytes));
-
-  Key := MD5Hash(Key);
-
-  // Simple XOR encryption (actual implementation may use AES)
-  SetLength(Result, Length(APlaintext));
-  for i := 0 to Length(APlaintext) - 1 do
-    Result[i] := APlaintext[i] xor Key[i mod Length(Key)];
-end;
-
-function TKasaKLAPClient.KlapDecrypt(const ACiphertext: TBytes; ASeq: Integer): TBytes;
-begin
-  // Decryption is same as encryption for XOR
-  Result := KlapEncrypt(ACiphertext, ASeq);
-end;
-*)
-
 type
   // Packed record for handshake1 response
   THandshake1Response = packed record
@@ -778,7 +738,7 @@ type
     AuthHash: array[0..31] of Byte;    // Adjust size as needed
   end;
 
-// Global variables (you'll need to declare these in your main unit)
+// Global variables
 var
   _localSeed: array[0..15] of Byte;
   _remoteSeed: array[0..15] of Byte;
@@ -807,24 +767,52 @@ function TKasaKLAPClient.Handshake(var StatusText: string): Boolean;
       AuthStart: integer;
     begin
       AuthHash := CalculateAuthHash(KlapVersion, aUsername, aPassword);
-      //WriteLn(format('Validate: %s credentials local auth hash: %s',[CredType, BytesToHex(AuthHash)]));
+      if assigned(FKasaLogger) then FKasaLogger(self,format('Validate: %s credentials local auth hash: %s',[CredType, BytesToHex(AuthHash)]));
 
       AuthStart := length(ValidationData)-length(AuthHash); //Place authhash at the end of ValidationData
       FillChar(ValidationData[AuthStart], length(AuthHash), #0);
       Move(AuthHash[0], ValidationData[AuthStart], length(AuthHash)); // auth hash goes last
-      //WriteLn(format('Validate: ValidationData: %s',[BytesToHex(ValidationData)]));
+      if assigned(FKasaLogger) then FKasaLogger(self,format('Validate: ValidationData: %s',[BytesToHex(ValidationData)]));
       HashToValidate := SHA256Hash(ValidationData);
-      //WriteLn(format('Validate: Auth HashToValidate (local_seed_auth_hash): %s',[BytesToHex(HashToValidate)]));
+      if assigned(FKasaLogger) then FKasaLogger(self,format('Validate: Auth HashToValidate (local_seed_auth_hash): %s',[BytesToHex(HashToValidate)]));
 
       // Compare the locally-calculated hash with the server-generated hash
       result := CompareMem(@HashToValidate[0], @TheServerHash[0], Length(HashToValidate));
-      //result := CompareMem(HashToValidate, aServerHash, Length(HashToValidate));
       if not result // Debug output
         then StatusText := StatusText + #13#10 + 'Hash validation failed for user="'+aUsername+'" - authentication rejected by server:'
         else StatusText := StatusText + #13#10 + 'Hash validation succeeded for user="'+aUsername+'!';
       StatusText := StatusText + #13#10 + '   AuthHash: ' + BytesToHex(AuthHash);
       StatusText := StatusText + #13#10 + '   Calculated: ' + BytesToHex(HashToValidate);
       StatusText := StatusText + #13#10 + '   Server sent: ' + BytesToHex(TheServerHash);
+    end;
+
+
+    function ValidateWithAltCredentials(KlapVersion: TKlapVersion; aPassword: string; TheServerHash: TBytes; var ValidationData, AuthHash: TBytes): boolean;
+    var
+      I: Integer;
+      jsoCred: ISuperObject;
+    begin
+      result := false;
+
+      if not Assigned(AltCredentials) or (AltCredentials.DataType <> stArray) then
+        Exit;
+
+      for I := 0 to AltCredentials.AsArray.Length - 1 do
+      begin
+        jsoCred := AltCredentials.AsArray[I];
+        if jsoCred.s['password'] <> '?'
+          then aPassword := jsoCred.s['password'];
+        try
+          aPassword := DecodeBase64(aPassword);
+        except
+          //Use as-is
+        end;
+        if Validate(KlapVersion, jsoCred.s['type'], jsoCred.s['userid'], aPassword, TheServerHash, ValidationData, AuthHash) then
+        begin
+          result := true;
+          Break;
+        end;
+      end;
     end;
 
   procedure RawHeadersToNamedValues(Headers: TStrings);
@@ -849,13 +837,16 @@ function TKasaKLAPClient.Handshake(var StatusText: string): Boolean;
     RawHeadersToNamedValues(Headers);
 
     // After handshake1 succeeds, debug ALL cookies being returned:
-    ////WriteLn('=== ALL COOKIES FROM HANDSHAKE1 ===');
-    // Get the full Set-Cookie header(s)
-    for I := 0 to Headers.Count - 1 do
-    begin
-      if Pos('Set-Cookie', Headers[I]) > 0 then
-        //WriteLn('Cookie Header: ' + Headers[I]);
-    end;
+    if assigned(FKasaLogger) then
+      begin
+        FKasaLogger(self,'=== ALL COOKIES FROM HANDSHAKE1 ===');
+        // Get the full Set-Cookie header(s)
+        for I := 0 to Headers.Count - 1 do
+        begin
+          if Pos('Set-Cookie', Headers[I]) > 0 then
+            FKasaLogger(self,'Cookie Header: ' + Headers[I]);
+        end;
+      end;
 
     // Extract session ID from cookies
     CookiesSL := TStringlist.Create;
@@ -872,26 +863,10 @@ function TKasaKLAPClient.Handshake(var StatusText: string): Boolean;
     finally
       CookiesSL.Free;
     end;
-    (*
-    CookieHeader := Headers.Values['Set-Cookie'];
-
-    // Extract TP_SESSIONID value
-    StartPos := Pos('TP_SESSIONID=', CookieHeader);
-    if StartPos > 0 then
-    begin
-      StartPos := StartPos + Length('TP_SESSIONID=');
-      EndPos := Pos(';', CookieHeader, StartPos);
-      if EndPos = 0 then
-        EndPos := Length(CookieHeader) + 1;
-      FSessionID := Copy(CookieHeader, StartPos, EndPos - StartPos);
-    end;
-    *)
-    {$IFDEF ForceDebug}
-    FSessionID := '5A99CD605658455597DE405191BEC453';
-    {$ENDIF}
   end;
 
 var
+  Success: boolean;
   URL: string;
   RequestStream, ResponseStream: TMemoryStream;
   ResponseData: TBytes;
@@ -899,11 +874,8 @@ var
   Cookie: TIdCookie;
   ServerHash: TBytes;
   ValidationData: TBytes;
-//  FHttpClient: TIdHttp;
   I: integer;
-//  IdCookieMgr: TIdCookieManager;
   UserHash, PassHash, Combined: TBytes;
-//  AllCookies: string;
   HTTPHelper: THTTPIOHandlerHelper;
   Headers,
   ResponseHeaders: TStringList;
@@ -926,6 +898,7 @@ begin
 
       HTTPHelper := THTTPIOHandlerHelper.Create;
       try
+        HTTPHelper.KasaLogger := KasaLogger;
         Headers := TStringList.Create;
         ResponseHeaders := TStringList.Create;
         try
@@ -947,18 +920,6 @@ begin
         HTTPHelper.Free;
       end;
 
-{$IFDEF ForceDebug}
-      //Local seed
-      HexStr := 'ebf8d7592cc6f1b67b1fae8344d81077';
-      HexToBin(PAnsiChar(HexStr), FLocalSeed, Length(FLocalSeed));
-      //WriteLn(format('FLocalSeed: %s',[BytesToHex(FLocalSeed)]));
-
-      //Handshake1 response stream
-      HexStr := 'f13dc651720dc450c24cc55183144451b371acca094baaafc40c3fd31aa1b39707e88c79d2a83ab950d6fb59295c556b';
-      ResponseStream.Position := 0;
-      HexToBin(PAnsiChar(HexStr), ResponseStream.Memory, ResponseStream.Size);
-{$ENDIF}
-
       // Validate response length (should be 48 bytes: 16 remote seed + 32 server hash)
       if ResponseStream.Size < 48 then
       begin
@@ -979,8 +940,11 @@ begin
       SetLength(ServerHash, 32);
       Move(ResponseData[16], ServerHash[0], 32);
 
-      //WriteLn(format('Server returned FRemoteSeed: %s',[BytesToHex(FRemoteSeed)]));
-      //WriteLn(format('Server returned ServerHash: %s.',[BytesToHex(ServerHash)]));
+      if assigned(FKasaLogger) then
+        begin
+          FKasaLogger(self,format('Server returned FRemoteSeed: %s',[BytesToHex(FRemoteSeed)]));
+          FKasaLogger(self,format('Server returned ServerHash: %s.',[BytesToHex(ServerHash)]));
+        end;
 
       case FKlapVersion of
         kvV1:
@@ -1000,22 +964,20 @@ begin
           end;
       end;
 
+
       StatusText := '';
-      if not Validate(FKlapVersion, 'USER', FUsername, FPassword, ServerHash, ValidationData, FAuthHash) //First try user's login credentials
-        then if not Validate(FKlapVersion, 'KASA', 'kasa@tp-link.net', 'kasaSetup', ServerHash, ValidationData, FAuthHash) //KASA
-        then if not Validate(FKlapVersion, 'KASACAMERA', 'test@tp-link.net', 'test', ServerHash, ValidationData, FAuthHash) //KASACAMERA
-        then if not Validate(FKlapVersion, 'TAPO', 'admin', '21232f297a57a5a743894a0e4a801fc3', ServerHash, ValidationData, FAuthHash) //TAPO
-        then if not Validate(FKlapVersion, 'TAPOCAMERA', 'admin', 'admin', ServerHash, ValidationData, FAuthHash)  //TAPOCAMERA
-        then if not Validate(FKlapVersion, 'NO-PW', 'admin', '', ServerHash, ValidationData, FAuthHash)
-        then if not Validate(FKlapVersion, 'ADMIN-USERPW', 'admin', FPassword, ServerHash, ValidationData, FAuthHash)
-        then if not Validate(FKlapVersion, 'BLANK-BLANK', '', '', ServerHash, ValidationData, FAuthHash)
-        then
+      Success := false;
+      if (FUsername <> '') and (FPassword <> '')
+        then Success := Validate(FKlapVersion, 'USER', FUsername, FPassword, ServerHash, ValidationData, FAuthHash); //First try user's login credentials
+      if not Success
+        then Success := ValidateWithAltCredentials(FKlapVersion, FPassword, ServerHash, ValidationData, FAuthHash);
+      if not Success then
         begin
-          StatusText := StatusText + #13#10 + 'None of the attempts validated!';
+          StatusText := StatusText + #13#10 + 'None of the attempts validated!'#13#10;
           Exit;
         end;
 
-        //WriteLn('AuthHash for successful handshake1 (hex): ' + BytesToHex(FAuthHash));
+        if assigned(FKasaLogger) then FKasaLogger(self,'AuthHash for successful handshake1 (hex): ' + BytesToHex(FAuthHash));
     finally
       RequestStream.Free;
       ResponseStream.Free;
@@ -1029,14 +991,17 @@ begin
     end;
   end;
 
-  //WriteLn('=== HANDSHAKE2 DEBUG ===');
-  //WriteLn(Format('SessionID: %s', [FSessionID]));
-  //WriteLn('LocalSeed (hex): ' + BytesToHex(FLocalSeed));
-  //WriteLn(Format('LocalSeed length: %d', [Length(FLocalSeed)]));
-  //WriteLn('RemoteSeed (hex): ' + BytesToHex(FRemoteSeed));
-  //WriteLn(Format('RemoteSeed length: %d', [Length(FRemoteSeed)]));
-  //WriteLn('AuthHash (hex): ' + BytesToHex(FAuthHash));
-  //WriteLn(Format('AuthHash length: %d', [Length(FAuthHash)]));
+  if assigned(FKasaLogger) then
+    begin
+      FKasaLogger(self,'=== HANDSHAKE2 DEBUG ===');
+      FKasaLogger(self,Format('SessionID: %s', [FSessionID]));
+      FKasaLogger(self,'LocalSeed (hex): ' + BytesToHex(FLocalSeed));
+      FKasaLogger(self,Format('LocalSeed length: %d', [Length(FLocalSeed)]));
+      FKasaLogger(self,'RemoteSeed (hex): ' + BytesToHex(FRemoteSeed));
+      FKasaLogger(self,Format('RemoteSeed length: %d', [Length(FRemoteSeed)]));
+      FKasaLogger(self,'AuthHash (hex): ' + BytesToHex(FAuthHash));
+      FKasaLogger(self,Format('AuthHash length: %d', [Length(FAuthHash)]));
+    end;
 
   case FKlapVersion of
     kvV1:
@@ -1067,26 +1032,28 @@ begin
       end;
   end;
 
-  //WriteLn('CombinedSeed (hex): ' + BytesToHex(CombinedSeed));
-  //WriteLn(Format('CombinedSeed total length: %d', [Length(CombinedSeed)]));
-  //WriteLn('CombinedSeedHash (hex): ' + BytesToHex(CombinedSeedHash));
-  //WriteLn(Format('CombinedSeedHash total length: %d', [Length(CombinedSeedHash)]));
+  if assigned(FKasaLogger) then
+    begin
+      FKasaLogger(self,'CombinedSeed (hex): ' + BytesToHex(CombinedSeed));
+      FKasaLogger(self,Format('CombinedSeed total length: %d', [Length(CombinedSeed)]));
+      FKasaLogger(self,'CombinedSeedHash (hex): ' + BytesToHex(CombinedSeedHash));
+      FKasaLogger(self,Format('CombinedSeedHash total length: %d', [Length(CombinedSeedHash)]));
+    end;
 
   URL := Format('http://%s/app/handshake2', [FHost]);
   try //except
     HTTPHelper := THTTPIOHandlerHelper.Create;
     try
+      HTTPHelper.KasaLogger := KasaLogger;
       Headers := TStringList.Create;
       ResponseHeaders := TStringList.Create;
       RequestStream := TMemoryStream.Create;
       ResponseStream := TMemoryStream.Create;
       try
         Headers.Add('Content-Type: application/octet-stream');
-        //Headers.Add('Connection: keep-alive');
         Headers.Add('Accept: */*');
         Headers.Add('Accept-Encoding: gzip, deflate');
         Headers.Add('Cookie: TP_SESSIONID=' + FSessionID); // + '; Max-Age=' + IntToStr(StrToInt(FTimeout)+1200) + '; Path=/');
-          //; Path=/; Domain=192.168.1.100; HttpOnly
         Headers.Add('User-Agent: Python/3.13 aiohttp/3.12.13');
 
         RequestStream.WriteBuffer(CombinedSeedHash[0], Length(CombinedSeedHash));
@@ -1103,8 +1070,12 @@ begin
         SetLength(ResponseData, ResponseStream.Size);
         ResponseStream.Position := 0;
         ResponseStream.ReadBuffer(ResponseData[0], ResponseStream.Size);
-        //WriteLn('POST Response:');
-        //WriteLn('ResponseData (hex): ' + BytesToHex(ResponseData));
+
+        if assigned(FKasaLogger) then
+          begin
+            FKasaLogger(self,'POST Response:');
+            FKasaLogger(self,'ResponseData (hex): ' + BytesToHex(ResponseData));
+          end;
       finally
         Headers.Free;
         ResponseHeaders.Free;
@@ -1126,115 +1097,6 @@ begin
     end;
   end;
 end;
-
-(*
-function AESEncryptCBC(const APlaintext: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
-var
-  Cipher: TDCP_rijndael;
-begin
-  Cipher := TDCP_rijndael.Create(nil);
-  try
-    Cipher.Init(Key[0], Length(Key) * 8, @IV[0]);
-    SetLength(Result, Length(APlaintext));
-    Cipher.EncryptCBC(APlaintext[0], Result[0], Length(APlaintext));
-  finally
-    Cipher.Free;
-  end;
-end;
-*)
-
-function AESEncryptCBC(const Data: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
-var
-  Cipher: TDCP_rijndael;
-  DataLen: Integer;
-begin
-  if Length(Key) <> 16 then
-    raise Exception.Create('AES-128 key must be 16 bytes');
-  if Length(IV) <> 16 then
-    raise Exception.Create('IV must be 16 bytes');
-  if Length(Data) = 0 then
-  begin
-    SetLength(Result, 0);
-    Exit;
-  end;
-
-  // Data must be padded to block size before calling this function
-  DataLen := Length(Data);
-  if (DataLen mod 16) <> 0 then
-    raise Exception.Create('Data must be padded to 16-byte blocks for AES-CBC');
-
-  Cipher := TDCP_rijndael.Create(nil);
-  try
-    Cipher.Init(Key[0], 128, @IV[0]); // 128-bit key
-    SetLength(Result, DataLen);
-    Cipher.EncryptCBC(Data[0], Result[0], DataLen);
-  finally
-    Cipher.Free;
-  end;
-end;
-
-function AESDecryptCBC(const Data: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
-var
-  Cipher: TDCP_rijndael;
-  DataLen: Integer;
-begin
-  if Length(Key) <> 16 then
-    raise Exception.Create('AES-128 key must be 16 bytes');
-  if Length(IV) <> 16 then
-    raise Exception.Create('IV must be 16 bytes');
-  if Length(Data) = 0 then
-  begin
-    SetLength(Result, 0);
-    Exit;
-  end;
-
-  DataLen := Length(Data);
-  if (DataLen mod 16) <> 0 then
-    raise Exception.Create('Encrypted data must be in 16-byte blocks');
-
-  Cipher := TDCP_rijndael.Create(nil);
-  try
-    Cipher.Init(Key[0], 128, @IV[0]); // 128-bit key
-    SetLength(Result, DataLen);
-    Cipher.DecryptCBC(Data[0], Result[0], DataLen);
-  finally
-    Cipher.Free;
-  end;
-end;
-
-(*
-function TKasaKLAPClient.KlapEncrypt(const APlaintext: TBytes; ASeq: Integer): TBytes;
-var
-  Key: TBytes;
-  IV: TBytes;
-  SeqBytes: TBytes;
-  KeyMaterial: TBytes;
-  EncryptedData: TBytes;
-begin
-  // Create proper key from local_seed + remote_seed + auth_hash
-  // This should be derived from your handshake process
-  SetLength(KeyMaterial, Length(FLocalSeed) + Length(FRemoteSeed) + Length(FAuthHash));
-  Move(FLocalSeed[0], KeyMaterial[0], Length(FLocalSeed));
-  Move(FRemoteSeed[0], KeyMaterial[Length(FLocalSeed)], Length(FRemoteSeed));
-  Move(FAuthHash[0], KeyMaterial[Length(FLocalSeed) + Length(FRemoteSeed)], Length(FAuthHash));
-
-  // Generate AES key (first 16 bytes of SHA256 hash)
-  Key := SHA256Hash(KeyMaterial);
-  SetLength(Key, 16); // AES-128 requires 16-byte key
-
-  // Create IV with sequence number in last 4 bytes
-  SetLength(IV, 16);
-  FillChar(IV[0], 12, 0); // First 12 bytes are zero
-  IV[12] := ASeq and $FF;
-  IV[13] := (ASeq shr 8) and $FF;
-  IV[14] := (ASeq shr 16) and $FF;
-  IV[15] := (ASeq shr 24) and $FF;
-
-  // Use AES-128-CBC encryption instead of XOR
-  Result := AESEncryptCBC(APlaintext, Key, IV);
-end;
-*)
-
 
 procedure TKasaKLAPClient.InitializeEncryption;
 var
@@ -1382,7 +1244,7 @@ begin
   Result := PKCS7Unpad(DecryptedData);
 end;
 
-function TKasaKLAPClient.SendCommand(ACommand: string): string;
+function TKasaKLAPClient.SendCommand(ACommand: string; var Res: string): boolean;
 var
   CombinedSeed: TBytes;
   CombinedSeedHash: TBytes;
@@ -1397,42 +1259,24 @@ var
   Headers,
   ResponseHeaders: TStringList;
 begin
-  Result := '';
+  Result := false;
   StatusText := '';
 
   if FSessionID = '' then
-    if not Handshake(StatusText) then
-      begin
-        result := StatusText;
-        Exit;
-      end;
+    if not Handshake(Res)
+      then Exit;
 
-  //WriteLn;
-  //WriteLn('=== SEND COMMAND ===');
-  //WriteLn(Format('SessionID: %s', [FSessionID]));
-  //WriteLn('LocalSeed (hex): ' + BytesToHex(FLocalSeed));
-
-
-  (* This comment-out code is happening in KlapEncrypt(), so not needed here.
-  // Calculate session key: SHA256(remote_seed + local_seed + auth_hash)
-  SetLength(CombinedSeed, Length(FLocalSeed) + Length(FRemoteSeed) + Length(FAuthHash));
-  Move(FLocalSeed[0], CombinedSeed[0], Length(FLocalSeed));
-  Move(FRemoteSeed[0], CombinedSeed[Length(FLocalSeed)], Length(FRemoteSeed));
-  Move(FAuthHash[0], CombinedSeed[Length(FLocalSeed) + Length(FRemoteSeed)], Length(FAuthHash));
-  FSessionKey := SHA256Hash(CombinedSeed); //CombinedSeedHash
-
-  SetLength(FSessionKey, 16);
-  *)
-
-  //ACommand := TFile.ReadAllText('C:\Dvlp\Kasa\kasa_command.txt', TEncoding.ASCII);
-  //At this point, ACommand = {"system":{"get_sysinfo":{}}}
-//  FSeqNum := 1;
-
+  if assigned(FKasaLogger) then
+    begin
+      FKasaLogger(self,'');
+      FKasaLogger(self,'=== SEND COMMAND ===');
+      FKasaLogger(self,Format('SessionID: %s', [FSessionID]));
+      FKasaLogger(self,'LocalSeed (hex): ' + BytesToHex(FLocalSeed));
+    end;
 
   PlaintextData := TEncoding.UTF8.GetBytes(ACommand); //Ascii ?
   EncryptedData := KlapEncrypt(PlaintextData{, FSeqNum});
 
-  //URL := Format('http://%s/app/request?seq=%d', [FHost, FSeqNum]);
   URL := Format('http://%s/app/request', [FHost]);
 
   RequestStream := TMemoryStream.Create;
@@ -1461,7 +1305,8 @@ begin
         ResponseStream.ReadBuffer(DecryptedData[0], ResponseStream.Size);
 
         DecryptedData := KlapDecrypt(DecryptedData{, FSeqNum});
-        Result := TEncoding.UTF8.GetString(DecryptedData);
+        Res := TEncoding.UTF8.GetString(DecryptedData);
+        result := true;
       finally
         Headers.Free;
         ResponseHeaders.Free;
@@ -1479,15 +1324,29 @@ begin
     on E: Exception do
     begin
       StatusText := StatusText + #13#10 + 'Unxepected error from SendCommand: ' + E.Message;
-      Result := StatusText;
     end;
   end;
+end;
+
+function TKasaKLAPClient.PerformSend(Command: string): Boolean;
+var
+  Response: string;
+begin
+  if SendCommand(Command, Response) then
+    begin
+      case FKlapVersion of
+        kvV1:
+          Result := Pos('"err_code":0', Response) > 0;
+        kvV2, kvV2_alt:
+          Result := (Pos('"error_code":0', Response) > 0) or (Pos('"result":', Response) > 0);
+      end;
+    end
+   else Result := false;
 end;
 
 function TKasaKLAPClient.TurnOn: Boolean;
 var
   Command: string;
-  Response: string;
 begin
   case FKlapVersion of
     kvV1:
@@ -1496,14 +1355,7 @@ begin
       Command := '{"method":"set_device_info","params":{"device_on":true}}';
   end;
 
-  Response := SendCommand(Command);
-
-  case FKlapVersion of
-    kvV1:
-      Result := Pos('"err_code":0', Response) > 0;
-    kvV2, kvV2_alt:
-      Result := (Pos('"error_code":0', Response) > 0) or (Pos('"result":', Response) > 0);
-  end;
+  result := PerformSend(Command);
 end;
 
 function TKasaKLAPClient.TurnOff: Boolean;
@@ -1518,17 +1370,10 @@ begin
       Command := '{"method":"set_device_info","params":{"device_on":false}}';
   end;
 
-  Response := SendCommand(Command);
-
-  case FKlapVersion of
-    kvV1:
-      Result := Pos('"err_code":0', Response) > 0;
-    kvV2, kvV2_alt:
-      Result := (Pos('"error_code":0', Response) > 0) or (Pos('"result":', Response) > 0);
-  end;
+  result := PerformSend(Command);
 end;
 
-function TKasaKLAPClient.GetDeviceInfo: string;
+function TKasaKLAPClient.GetDeviceInfo(var Res: string): boolean;
 var
   Command: string;
 begin
@@ -1539,7 +1384,7 @@ begin
       Command := '{"method":"get_device_info","params":null}';
   end;
 
-  Result := SendCommand(Command);
+  result := SendCommand(Command, Res);
 end;
 
 end.
