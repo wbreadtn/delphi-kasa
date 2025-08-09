@@ -378,6 +378,7 @@ begin
       repeat
         WriteLn(format('Make a selection (Host=%s, Port=%s):',[BoolToString(Host<>'',Host,'unassigned'),BoolToString(Port<>-1,IntToStr(Port),'unassigned')]));
         WriteLn('  ? - Help');
+        WriteLn('  L - Toggle logger on/off');
         WriteLn('  0 - Enter Host and Port');
         WriteLn('  1 - Test connection');
         WriteLn('  2 - Demo XOR device communication '+BoolToString((Port<>-1) and (Port<>80),'(reccommended)',''));
@@ -389,6 +390,14 @@ begin
           begin
             WriteLn;
             Demo.Help;
+            WriteLn;
+            continue;
+          end;
+        if SameText(st,'L') then
+          begin
+            WriteLn;
+            Demo.DoLog := not Demo.DoLog;
+            WriteLn('Logger is now '+BoolToString(Demo.DoLog,'ON','OFF'));
             WriteLn;
             continue;
           end;
