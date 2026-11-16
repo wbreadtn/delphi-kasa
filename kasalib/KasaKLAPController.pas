@@ -1,5 +1,6 @@
 unit KasaKLAPController;
 
+
 interface
 
 uses
@@ -81,6 +82,7 @@ type
     FBaseIV: TBytes;
     FSignatureKey: TBytes;
     FKlapVersion: TKlapVersion;
+    FUseLegacyControlCommands: Boolean;
     FAltCredentials: ISuperobject;
     FKasaLogger: TKasaLogger;
     function GenerateRandomBytes(ALength: Integer): TBytes;
@@ -107,6 +109,12 @@ type
     property Username: string read FUsername write FUsername;
     property Password: string read FPassword write FPassword;
     property KlapVersion: TKlapVersion read FKlapVersion write FKlapVersion;
+    // Some devices migrated to KLAP transport/auth by a firmware update still only
+    // accept the older IOT-style control commands (set_relay_state) rather than
+    // the newer set_device_info command, even though KlapVersion kvV2 auth and
+    // get_device_info queries work fine. Set this True for those devices; it only
+    // affects TurnOn/TurnOff's command format and success check, not auth/transport.
+    property UseLegacyControlCommands: Boolean read FUseLegacyControlCommands write FUseLegacyControlCommands;
     property AltCredentials: ISuperobject read FAltCredentials write FAltCredentials;
     property KasaLogger: TKasaLogger read FKasaLogger write FKasaLogger;
   end;
@@ -152,8 +160,14 @@ begin
     end;
   end;
 
-  // Set timeouts and buffer sizes
-  AIOHandler.ConnectTimeout := 30000;
+  // ConnectTimeout is deliberately much shorter than ReadTimeout: an offline/
+  // unreachable device's connect attempt never gets past this stage, so a
+  // generous timeout here only makes every failure slower without helping
+  // any real (reachable) device - those complete the TCP handshake in
+  // milliseconds on a LAN. ReadTimeout stays generous since a reachable
+  // device's multi-step KLAP handshake (AES/SHA crypto round trips) can
+  // legitimately take a moment on constrained hardware.
+  AIOHandler.ConnectTimeout := 2000;
   AIOHandler.ReadTimeout := 30000;
 end;
 
@@ -321,8 +335,14 @@ var
   ResponseText: string;
   DoAppend: boolean;
   RequestPath: string;
+  ContentLength: Integer;
+  EmptyReadCount: Integer;
+  HeaderIdx: Integer;
+  HeaderLine: string;
+  ColonPos: Integer;
 const
   BUFFER_SIZE = 8192;
+  MAX_EMPTY_READS = 20; // 20 * 250ms = 5s of silence with a known Content-Length before giving up
 begin
   if not Assigned(AResponseStream) then
     raise Exception.Create('Response stream cannot be nil');
@@ -403,6 +423,7 @@ begin
       HeadersEnd := 0;
       ResponseCode := -1;
       StatusLine := '';
+      ContentLength := -1;
 
       while IOHandler.Connected and not HeadersComplete do
       begin
@@ -442,6 +463,21 @@ begin
                 ResponseHeaders.LoadFromStream(TempStream, TEncoding.Unicode);
                 ResponseHeaders.Delete(ResponseHeaders.Count-1); //Last item will always be blank in this case
                 TempStream.Clear;
+
+                // Find Content-Length so the body loop below knows exactly how
+                // many bytes to wait for, instead of guessing from a quiet
+                // period on the socket (which races against multi-segment
+                // TCP delivery and can hand back a truncated response).
+                for HeaderIdx := 0 to ResponseHeaders.Count - 1 do
+                begin
+                  HeaderLine := ResponseHeaders[HeaderIdx];
+                  ColonPos := Pos(':', HeaderLine);
+                  if (ColonPos > 0) and SameText(Trim(Copy(HeaderLine, 1, ColonPos - 1)), 'Content-Length') then
+                  begin
+                    ContentLength := StrToIntDef(Trim(Copy(HeaderLine, ColonPos + 1, MaxInt)), -1);
+                    Break;
+                  end;
+                end;
               end;
           end;
 
@@ -462,21 +498,46 @@ begin
 
       // Continue reading response body
       TotalBytesRead := 0;
+      EmptyReadCount := 0;
       while IOHandler.Connected do
       begin
+        // If we know exactly how much to expect and have it all, stop cleanly
+        // rather than waiting for a quiet period that may never come (e.g.
+        // keep-alive connections).
+        if (ContentLength >= 0) and (TotalBytesRead >= ContentLength) then
+          Break;
         try
           // Check if there's data available to read
           if IOHandler.InputBufferIsEmpty then
           begin
-            IOHandler.CheckForDataOnSource(100); // 100ms timeout
+            IOHandler.CheckForDataOnSource(250);
             if IOHandler.InputBufferIsEmpty then
-              Break;
+            begin
+              if ContentLength >= 0 then
+              begin
+                // We know the exact expected length — a single quiet period
+                // doesn't mean the response is complete, the reply may just
+                // be split across more than one TCP segment. Only give up
+                // after sustained silence.
+                Inc(EmptyReadCount);
+                if EmptyReadCount >= MAX_EMPTY_READS then
+                  raise Exception.CreateFmt(
+                    'Timed out waiting for response body: got %d of %d expected bytes',
+                    [TotalBytesRead, ContentLength]);
+                Continue;
+              end
+              else
+                Break; // Length unknown — quiet-socket heuristic is the best we can do.
+            end;
           end;
+          EmptyReadCount := 0;
 
           // Read available data from input buffer
           ChunkSize := IOHandler.InputBuffer.Size;
           if ChunkSize > BUFFER_SIZE then
             ChunkSize := BUFFER_SIZE;
+          if (ContentLength >= 0) and (ChunkSize > ContentLength - TotalBytesRead) then
+            ChunkSize := ContentLength - TotalBytesRead;
 
           DoAppend := false;
           if ChunkSize > 0 then
@@ -496,11 +557,26 @@ begin
           on EIdConnClosedGracefully do
             Break;
           on EIdReadTimeout do
+          begin
+            // If we know we're short, a "timeout" is a real failure, not
+            // end-of-response — don't silently hand back truncated data.
+            if (ContentLength >= 0) and (TotalBytesRead < ContentLength) then
+              raise;
             Break;
+          end;
           on E: Exception do
+          begin
+            if (ContentLength >= 0) and (TotalBytesRead < ContentLength) then
+              raise;
             Break;
+          end;
         end;
       end;
+
+      if (ContentLength >= 0) and (TotalBytesRead < ContentLength) then
+        raise Exception.CreateFmt(
+          'Incomplete response body: got %d of %d expected bytes',
+          [TotalBytesRead, ContentLength]);
 
       // Copy complete response to output stream
       TempStream.Position := 0;
@@ -846,7 +922,8 @@ function TKasaKLAPClient.Handshake(var StatusText: string): Boolean;
           if Pos('Set-Cookie', Headers[I]) > 0 then
             FKasaLogger(self,'Cookie Header: ' + Headers[I]);
         end;
-      end;
+
+      end;
 
     // Extract session ID from cookies
     CookiesSL := TStringlist.Create;
@@ -1022,7 +1099,8 @@ begin
         CombinedSeedHash := SHA256Hash(CombinedSeed);
       end;
     kvV2_Alt:
-      begin
+
+      begin
         // Calculate session key: SHA256(local_seed + remote_seed + auth_hash)
         SetLength(CombinedSeed, Length(FLocalSeed) + Length(FRemoteSeed) + Length(FAuthHash));
         Move(FLocalSeed[0], CombinedSeed[0], Length(FLocalSeed));
@@ -1225,6 +1303,13 @@ var
   DecryptedData: TBytes;
   IV: TBytes;
 begin
+  // A truncated/incomplete response (e.g. a network hiccup upstream) must
+  // fail loudly here, not walk off the end of AEncryptedData.
+  if Length(AEncryptedData) < 32 then
+    raise Exception.CreateFmt(
+      'KlapDecrypt: response too short to contain a signature (%d bytes, need at least 32)',
+      [Length(AEncryptedData)]);
+
   // Skip first 32 bytes (signature) and decrypt the rest
   SetLength(CipherText, Length(AEncryptedData) - 32);
   Move(AEncryptedData[32], CipherText[0], Length(CipherText));
@@ -1272,10 +1357,17 @@ begin
       FKasaLogger(self,'=== SEND COMMAND ===');
       FKasaLogger(self,Format('SessionID: %s', [FSessionID]));
       FKasaLogger(self,'LocalSeed (hex): ' + BytesToHex(FLocalSeed));
-    end;
+
+    end;
 
   PlaintextData := TEncoding.UTF8.GetBytes(ACommand); //Ascii ?
   EncryptedData := KlapEncrypt(PlaintextData{, FSeqNum});
+
+  if assigned(FKasaLogger) then
+    begin
+      FKasaLogger(self,'Command (plaintext): ' + ACommand);
+      FKasaLogger(self,Format('EncryptedData length: %d, SeqNum: %d',[Length(EncryptedData), FSeqNum]));
+    end;
 
   URL := Format('http://%s/app/request', [FHost]);
 
@@ -1304,9 +1396,15 @@ begin
         SetLength(DecryptedData, ResponseStream.Size);
         ResponseStream.ReadBuffer(DecryptedData[0], ResponseStream.Size);
 
+        if assigned(FKasaLogger) then
+          FKasaLogger(self,Format('Raw response length: %d bytes, hex: %s',[Length(DecryptedData), BytesToHex(DecryptedData)]));
+
         DecryptedData := KlapDecrypt(DecryptedData{, FSeqNum});
         Res := TEncoding.UTF8.GetString(DecryptedData);
         result := true;
+
+        if assigned(FKasaLogger) then
+          FKasaLogger(self,'Decrypted response: "' + Res + '"');
       finally
         Headers.Free;
         ResponseHeaders.Free;
@@ -1334,12 +1432,15 @@ var
 begin
   if SendCommand(Command, Response) then
     begin
-      case FKlapVersion of
-        kvV1:
-          Result := Pos('"err_code":0', Response) > 0;
-        kvV2, kvV2_alt:
-          Result := (Pos('"error_code":0', Response) > 0) or (Pos('"result":', Response) > 0);
-      end;
+      if FUseLegacyControlCommands then
+        Result := Pos('"err_code":0', Response) > 0
+      else
+        case FKlapVersion of
+          kvV1:
+            Result := Pos('"err_code":0', Response) > 0;
+          kvV2, kvV2_alt:
+            Result := (Pos('"error_code":0', Response) > 0) or (Pos('"result":', Response) > 0);
+        end;
     end
    else Result := false;
 end;
@@ -1348,12 +1449,15 @@ function TKasaKLAPClient.TurnOn: Boolean;
 var
   Command: string;
 begin
-  case FKlapVersion of
-    kvV1:
-      Command := '{"system":{"set_relay_state":{"state":1}}}';
-    kvV2, kvV2_alt:
-      Command := '{"method":"set_device_info","params":{"device_on":true}}';
-  end;
+  if FUseLegacyControlCommands then
+    Command := '{"system":{"set_relay_state":{"state":1}}}'
+  else
+    case FKlapVersion of
+      kvV1:
+        Command := '{"system":{"set_relay_state":{"state":1}}}';
+      kvV2, kvV2_alt:
+        Command := '{"method":"set_device_info","params":{"device_on":true}}';
+    end;
 
   result := PerformSend(Command);
 end;
@@ -1363,11 +1467,14 @@ var
   Command: string;
   Response: string;
 begin
-  case FKlapVersion of
-    kvV1:
-      Command := '{"system":{"set_relay_state":{"state":0}}}';
-    kvV2, kvV2_alt:
-      Command := '{"method":"set_device_info","params":{"device_on":false}}';
+  if FUseLegacyControlCommands then
+    Command := '{"system":{"set_relay_state":{"state":0}}}'
+  else
+    case FKlapVersion of
+      kvV1:
+        Command := '{"system":{"set_relay_state":{"state":0}}}';
+      kvV2, kvV2_alt:
+        Command := '{"method":"set_device_info","params":{"device_on":false}}';
   end;
 
   result := PerformSend(Command);
@@ -1377,12 +1484,15 @@ function TKasaKLAPClient.GetDeviceInfo(var Res: string): boolean;
 var
   Command: string;
 begin
-  case FKlapVersion of
-    kvV1:
-      Command := '{"system":{"get_sysinfo":{}}}';
-    kvV2, kvV2_alt:
-      Command := '{"method":"get_device_info","params":null}';
-  end;
+  if FUseLegacyControlCommands then
+    Command := '{"system":{"get_sysinfo":{}}}'
+  else
+    case FKlapVersion of
+      kvV1:
+        Command := '{"system":{"get_sysinfo":{}}}';
+      kvV2, kvV2_alt:
+        Command := '{"method":"get_device_info","params":null}';
+    end;
 
   result := SendCommand(Command, Res);
 end;

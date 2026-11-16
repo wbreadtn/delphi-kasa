@@ -7,9 +7,11 @@ uses
   ,IdGlobal
   ,IdHashMessageDigest
   ,IdHashSHA
+  ,IdCoderMIME
   ,IdSSLOpenSSL
   ,DCPsha256
   ,DCPcrypt2
+  ,DCPrijndael
   ;
 
 procedure TBytesToTIdBytes(const Input: TBytes; var Output: TIdBytes);
@@ -27,6 +29,13 @@ function SHA1Hash(const AData: string): TBytes; overload;
 function SHA256Hash(const AData: TBytes): TBytes; overload;
 function SHA256Hash(const AData: string): TBytes; overload;
 
+function AESEncryptCBCStr(const APlaintext: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
+function AESEncryptCBC(const Data: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
+function AESDecryptCBC(const Data: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
+
+//Not Crypto, but...
+function EncodeBase64(const AInput: string): string;
+function DecodeBase64(const AInput: string): string;
 
 implementation
 
@@ -181,6 +190,96 @@ function SHA256Hash(const AData: string): TBytes;
 begin
   //Result := SHA256Hash(TEncoding.UTF8.GetBytes(AData));
   Result := SHA256Hash(TEncoding.Ascii.GetBytes(AData));
+end;
+
+function EncodeBase64(const AInput: string): string;
+var
+  Encoder: TIdEncoderMIME;
+begin
+  Encoder := TIdEncoderMIME.Create(nil);
+  try
+    Result := Encoder.Encode(AInput);
+  finally
+    Encoder.Free;
+  end;
+end;
+
+function DecodeBase64(const AInput: string): string;
+begin
+  result := TIdDecoderMIME.DecodeString(AInput, IndyTextEncoding_ASCII);
+end;
+
+function AESEncryptCBCStr(const APlaintext: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
+var
+  Cipher: TDCP_rijndael;
+begin
+  Cipher := TDCP_rijndael.Create(nil);
+  try
+    Cipher.Init(Key[0], Length(Key) * 8, @IV[0]);
+    SetLength(Result, Length(APlaintext));
+    Cipher.EncryptCBC(APlaintext[0], Result[0], Length(APlaintext));
+  finally
+    Cipher.Free;
+  end;
+end;
+
+function AESEncryptCBC(const Data: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
+var
+  Cipher: TDCP_rijndael;
+  DataLen: Integer;
+begin
+  if Length(Key) <> 16 then
+    raise Exception.Create('AES-128 key must be 16 bytes');
+  if Length(IV) <> 16 then
+    raise Exception.Create('IV must be 16 bytes');
+  if Length(Data) = 0 then
+  begin
+    SetLength(Result, 0);
+    Exit;
+  end;
+
+  // Data must be padded to block size before calling this function
+  DataLen := Length(Data);
+  if (DataLen mod 16) <> 0 then
+    raise Exception.Create('Data must be padded to 16-byte blocks for AES-CBC');
+
+  Cipher := TDCP_rijndael.Create(nil);
+  try
+    Cipher.Init(Key[0], 128, @IV[0]); // 128-bit key
+    SetLength(Result, DataLen);
+    Cipher.EncryptCBC(Data[0], Result[0], DataLen);
+  finally
+    Cipher.Free;
+  end;
+end;
+
+function AESDecryptCBC(const Data: TBytes; const Key: TBytes; const IV: TBytes): TBytes;
+var
+  Cipher: TDCP_rijndael;
+  DataLen: Integer;
+begin
+  if Length(Key) <> 16 then
+    raise Exception.Create('AES-128 key must be 16 bytes');
+  if Length(IV) <> 16 then
+    raise Exception.Create('IV must be 16 bytes');
+  if Length(Data) = 0 then
+  begin
+    SetLength(Result, 0);
+    Exit;
+  end;
+
+  DataLen := Length(Data);
+  if (DataLen mod 16) <> 0 then
+    raise Exception.Create('Encrypted data must be in 16-byte blocks');
+
+  Cipher := TDCP_rijndael.Create(nil);
+  try
+    Cipher.Init(Key[0], 128, @IV[0]); // 128-bit key
+    SetLength(Result, DataLen);
+    Cipher.DecryptCBC(Data[0], Result[0], DataLen);
+  finally
+    Cipher.Free;
+  end;
 end;
 
 end.

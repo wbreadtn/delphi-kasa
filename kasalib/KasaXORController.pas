@@ -7,6 +7,15 @@ uses
   IdTCPClient, IdExceptionCore, IdException, IdGlobal;
 
 type
+  // Distinct class for this unit's own wrapped communication failures (offline
+  // device, connect timeout, malformed response, etc.) so callers - and the
+  // IDE's "ignore this exception" debugger setting - can tell an expected,
+  // already-handled device-communication failure apart from a plain Exception
+  // raised for some other reason. Note this only covers exceptions raised
+  // *here*; a lower-level failure (e.g. an Indy/RTL exception raised before
+  // SendCommand's except block runs) still surfaces under its own class.
+  EKasaDeviceUnreachable = class(Exception);
+
   TKasaDeviceInfo = record
     DeviceId: string;
     Model: string;
@@ -23,6 +32,7 @@ type
     FHost: string;
     FPort: Integer;
     FTimeout: Integer;
+    FConnectTimeout: Integer;
 
     function EncryptKasaMessage(const Message: string): TBytes;
     function DecryptKasaMessage(const Data: TBytes): string;
@@ -32,7 +42,14 @@ type
     function CreateRelayCommand(State: Boolean): string;
 
   public
-    constructor Create(const Host: string; Port: Integer = 9999; Timeout: Integer = 5000);
+    // Timeout applies to reading a response from an already-connected device.
+    // ConnectTimeout is deliberately much shorter by default: an offline/
+    // unreachable device's connect attempt never gets past this stage, so a
+    // generous Timeout only makes every failure slower without helping any
+    // real (reachable) device, which typically completes the TCP handshake
+    // in milliseconds on a LAN.
+    constructor Create(const Host: string; Port: Integer = 9999; Timeout: Integer = 5000;
+      ConnectTimeout: Integer = 2000);
 
     // Main control methods
     function TurnOn: Boolean;
@@ -51,16 +68,19 @@ type
     property Host: string read FHost write FHost;
     property Port: Integer read FPort write FPort;
     property Timeout: Integer read FTimeout write FTimeout;
+    property ConnectTimeout: Integer read FConnectTimeout write FConnectTimeout;
   end;
 
 implementation
 
-constructor TKasaXORController.Create(const Host: string; Port: Integer = 9999; Timeout: Integer = 5000);
+constructor TKasaXORController.Create(const Host: string; Port: Integer = 9999; Timeout: Integer = 5000;
+  ConnectTimeout: Integer = 2000);
 begin
   inherited Create;
   FHost := Host;
   FPort := Port;
   FTimeout := Timeout;
+  FConnectTimeout := ConnectTimeout;
 end;
 
 function TKasaXORController.EncryptKasaMessage(const Message: string): TBytes;
@@ -179,7 +199,7 @@ begin
   try
     TCPClient.Host := FHost;
     TCPClient.Port := FPort;
-    TCPClient.ConnectTimeout := FTimeout;
+    TCPClient.ConnectTimeout := FConnectTimeout;
     TCPClient.ReadTimeout := FTimeout;
 
     try
@@ -223,7 +243,7 @@ begin
 
     except
       on E: Exception do
-        raise Exception.Create('Communication error: ' + E.Message);
+        raise EKasaDeviceUnreachable.Create('Communication error: ' + E.Message);
     end;
 
   finally
@@ -275,7 +295,7 @@ begin
     end;
   except
     on E: Exception do
-      raise Exception.Create('Failed to turn on device: ' + E.Message);
+      raise EKasaDeviceUnreachable.Create('Failed to turn on device: ' + E.Message);
   end;
 end;
 
@@ -308,7 +328,7 @@ begin
     end;
   except
     on E: Exception do
-      raise Exception.Create('Failed to turn off device: ' + E.Message);
+      raise EKasaDeviceUnreachable.Create('Failed to turn off device: ' + E.Message);
   end;
 end;
 
@@ -367,7 +387,7 @@ begin
     end;
   except
     on E: Exception do
-      raise Exception.Create('Failed to get device info: ' + E.Message);
+      raise EKasaDeviceUnreachable.Create('Failed to get device info: ' + E.Message);
   end;
 end;
 
@@ -377,7 +397,7 @@ begin
     Result := SendCommand(CreateSystemCommand);
   except
     on E: Exception do
-      raise Exception.Create('Failed to get system info: ' + E.Message);
+      raise EKasaDeviceUnreachable.Create('Failed to get system info: ' + E.Message);
   end;
 end;
 
@@ -417,7 +437,7 @@ begin
     end;
   except
     on E: Exception do
-      raise Exception.Create('Failed to set LED state: ' + E.Message);
+      raise EKasaDeviceUnreachable.Create('Failed to set LED state: ' + E.Message);
   end;
 end;
 
